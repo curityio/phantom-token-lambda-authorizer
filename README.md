@@ -52,7 +52,7 @@ External services can leverage lambda functions in different ways. This implemen
 
 The function will return a JSON payload containing the JWT representation of the opaque access token that was introspected. The API Gateway should be configured to handle this response accordingly.
 
-```json
+```js
 {
     token_type: 'Bearer',
     access_token: eyJraWQiO...2CWnDGG5WiB7o7Nwfg
