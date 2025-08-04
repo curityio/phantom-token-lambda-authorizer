@@ -17,31 +17,20 @@
 /* Used to read values from .env */
 require('dotenv').config();
 
-/* Verify provded scope against configured required scope */
+/* Verify provided scope against configured required scope */
 function verifyScope(providedScope, requiredScope) {
-  let returnValue = true;
+  if (!requiredScope) return true;
 
-  if(!requiredScope) { 
-    return returnValue;
-  }
+  const providedSplitScope = providedScope.split(' ');
+  const requiredSplitScope = requiredScope.split(' ');
 
-  let providedSplitScope = providedScope.split(' ');
-  let requiredSplitScope = requiredScope.split(' ');
-  
-  for(var i = 0; i < requiredSplitScope.length; i++) {
-    if(!providedSplitScope.includes(requiredSplitScope[i])) {
-      returnValue = false;
-      break;
-    }
-  }
-
-  return returnValue;
+  return requiredSplitScope.every(scope => providedSplitScope.includes(scope));
 }
 
 /* Introspect access token */
 function introspect(options, data) {
   return new Promise((resolve, reject) => {
-    var https = require('https');
+    const https = require('https');
 
     const req = https.request(options, (res) => {
       res.setEncoding("utf8");
@@ -65,11 +54,13 @@ function introspect(options, data) {
   });
 }
 
-exports.handler = async function(event, context) {
+exports.handler = async function (event) {
   if (!event.headers || !event.headers.authorization || !event.headers.authorization.startsWith("Bearer ")) {
     console.log("Missing or malformed Authorization header");
-    context.fail("Unauthorized");
-    return;
+    return {
+      statusCode: 401,
+      body: JSON.stringify({ error: "missing_or_malformed_authorization" })
+    };
   }
 
   const token = event.headers.authorization.substring(7); // Strip 'Bearer '
@@ -106,11 +97,17 @@ exports.handler = async function(event, context) {
         })
       };
     } else {
-      console.log("Introspection returned no token");
-      context.fail("Unauthorized");
+      console.log("Introspection succeeded but returned no JWT");
+      return {
+        statusCode: 401,
+        body: JSON.stringify({ error: "invalid_token" })
+      };
     }
   } catch (err) {
-    console.error("Introspection failed:", err);
-    context.fail("Unauthorized");
+    console.error("Introspection call failed:", err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: "introspection_call_failed" })
+    };
   }
 };
