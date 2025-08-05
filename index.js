@@ -1,5 +1,5 @@
 /*
- *  Copyright 2021 Curity AB
+ *  Copyright 2025 Curity AB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -17,85 +17,21 @@
 /* Used to read values from .env */
 require('dotenv').config();
 
-/* Default deny all policy */
-const defaultDenyAllPolicy = {
-  "principalId":"user",
-  "policyDocument":{
-    "Version":"2012-10-17",
-    "Statement":[
-      {
-        "Action":"execute-api:Invoke",
-        "Effect":"Deny",
-        "Resource":"*"
-      }
-    ]
-  }
-};
-    
-/* Generate an IAM policy statement */
-function generatePolicyStatement(methodArn, action) {
-  
-  const statement = {};
-  statement.Action = 'execute-api:Invoke';
-  statement.Effect = action;
-  statement.Resource = methodArn;
-  return statement;
-}
-  
-function generatePolicy(principalId, policyStatements) {
-  const authResponse = {};
-  authResponse.principalId = principalId;
-  const policyDocument = {};
-  policyDocument.Version = '2012-10-17';
-  policyDocument.Statement = policyStatements;
-  authResponse.policyDocument = policyDocument;
-  return authResponse;
-}
-
-/* Generate an IAM policy */
-function generateIAMPolicy(providedScope, user, methodArn) {
-  const policyStatements = [];
-  
-  /* Check if token scopes exist in API Permission */
-  let hasScopes =  verifyScope(providedScope, process.env.SCOPE);
-  if ( hasScopes ) {
-    policyStatements.push(generatePolicyStatement(getServiceArn(methodArn), "Allow")); //Wildcard path generated. Needed if IAM policies are cached and multipe API paths are using the Authorizer
-    // policyStatements.push(generatePolicyStatement(methodArn, "Allow")); //Used for a more strict approach with no caching of IAM policies.
-  }
-
-  /* Check if no policy statement is generated, if so, return default deny all policy statement */
-  if (policyStatements.length === 0) {
-    return defaultDenyAllPolicy;
-  } else {
-    return generatePolicy(user, policyStatements);
-  }
-}
-
-/* Verify provded scope against configured required scope */
+/* Verify provided scope against configured required scope */
 function verifyScope(providedScope, requiredScope) {
-  let returnValue = true;
+  if (!requiredScope) return true;
 
-  if(!requiredScope) { 
-    return returnValue;
-  }
+  const providedSplitScope = providedScope.split(' ');
+  const requiredSplitScope = requiredScope.split(' ');
 
-  let providedSplitScope = providedScope.split(' ');
-  let requiredSplitScope = requiredScope.split(' ');
-  
-  for(var i = 0; i < requiredSplitScope.length; i++) {
-    if(!providedSplitScope.includes(requiredSplitScope[i])) {
-      returnValue = false;
-      break;
-    }
-  }
-
-  return returnValue;
+  return requiredSplitScope.every(scope => providedSplitScope.includes(scope));
 }
 
 /* Introspect access token */
 function introspect(options, data) {
   return new Promise((resolve, reject) => {
-    var https = require('https');
+    const https = require('https');
+
     const req = https.request(options, (res) => {
       res.setEncoding("utf8");
       let responseBody = "";
@@ -118,72 +54,60 @@ function introspect(options, data) {
   });
 }
 
-function getServiceArn(methodArn) {
-
-    // Get the last part, such as cqo3riplm6/default/GET/products
-    const parts = methodArn.split(':');
-    if (parts.length === 6) {
-
-        // Split the path into parts
-        const pathParts = parts[5].split('/');
-        if (pathParts.length >= 4) {
-
-            // Update the final part to a wildcard value such as cqo3riplm6/mystage/*, to apply to all lambdas in the API
-            parts[5] = `${pathParts[0]}/${pathParts[1]}/*`;
-            const result = parts.join(':');
-            return result;
-        }
-    }
-
-    // Sanity check
-    throw new Error(`Unexpected method ARN received: ${methodArn}`);
-}
-
-exports.handler = async function(event, context) {
-  
-  if(!event.authorizationToken) {
-    context.fail("Unauthorized");
-    return;
+exports.handler = async function (event) {
+  if (!event.headers || !event.headers.authorization || !event.headers.authorization.startsWith("Bearer ")) {
+    console.log("Missing or malformed Authorization header");
+    return {
+      statusCode: 401,
+      body: JSON.stringify({ error: "missing_or_malformed_authorization" })
+    };
   }
-  
-  const token = event.authorizationToken.replace("Bearer ", "");
+
+  const token = event.headers.authorization.substring(7); // Strip 'Bearer '
 
   const data = new URLSearchParams();
   data.append('token', token);
 
-  //Base64 encode client_id and client_secret to authenticate Introspection endpoint
-  const introspectCredentials = Buffer.from(process.env.CLIENT_ID + ":" + process.env.CLIENT_SECRET, 'utf-8').toString('base64');
+  const introspectCredentials = Buffer
+    .from(`${process.env.CLIENT_ID}:${process.env.CLIENT_SECRET}`, 'utf-8')
+    .toString('base64');
 
   const options = {
     host: process.env.HOST,
     path: process.env.INTROSPECTION_PATH,
     method: 'POST',
-    port: process.env.PORT,
+    port: process.env.PORT || 443,
     headers: {
-      'Authorization': 'Basic ' + introspectCredentials,
-      'Accept': 'application/jwt', //Get Phantom Token directly in Introspection response
+      'Authorization': `Basic ${introspectCredentials}`,
+      'Accept': 'application/jwt',
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Content-Length': data.toString().length
+      'Content-Length': Buffer.byteLength(data.toString())
     }
   };
 
-  const jwt = await introspect(options, data.toString());
-  
-  if(jwt.length > 0 ) {
-    const base64String = jwt.toString().split('.')[1];
-    const decodedValue = JSON.parse(Buffer.from(base64String,'base64').toString('ascii'));
-    
-    let iamPolicy = generateIAMPolicy(decodedValue.scope, decodedValue.sub, event.methodArn);
-  
-    //Add Phantom Token (jwt) to context making it available to API GW to add to upstream Authorization header
-    iamPolicy.context = {
-      "Authorization": jwt
+  try {
+    const jwt = await introspect(options, data.toString());
+
+    if (jwt && jwt.length > 0) {
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          token_type: "Bearer",
+          access_token: jwt
+        })
+      };
+    } else {
+      console.log("Introspection succeeded but returned no JWT");
+      return {
+        statusCode: 401,
+        body: JSON.stringify({ error: "invalid_token" })
+      };
+    }
+  } catch (err) {
+    console.error("Introspection call failed:", err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: "introspection_call_failed" })
     };
-  
-    return iamPolicy;
-  }
-  else {
-    context.fail("Unauthorized");
-    return;
   }
 };
